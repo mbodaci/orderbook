@@ -21,11 +21,17 @@ target_include_directories(orderbook PUBLIC ${PROJECT_SOURCE_DIR}/include)
 target_compile_options(orderbook PUBLIC -Wall -Wextra -Werror)
 
 enable_testing()
-add_executable(orderbook_tests tests/test_matching.cpp tests/test_edge_cases.cpp)
-target_link_libraries(orderbook_tests PRIVATE orderbook GTest::gtest_main)
+find_package(Threads REQUIRED)
+
+add_executable(orderbook_tests
+    tests/test_matching.cpp tests/test_edge_cases.cpp tests/test_spsc_queue.cpp)
+target_link_libraries(orderbook_tests PRIVATE orderbook GTest::gtest_main Threads::Threads)
 
 include(GoogleTest)
 gtest_discover_tests(orderbook_tests)
 
 add_executable(bench_orderbook bench/bench_orderbook.cpp)
 target_link_libraries(bench_orderbook PRIVATE orderbook)
+
+add_executable(bench_spsc bench/bench_spsc.cpp)
+target_link_libraries(bench_spsc PRIVATE orderbook Threads::Threads)

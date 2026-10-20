@@ -150,12 +150,220 @@ by tick gives O(1) level lookup without a tree or a search. This is also unteste
 
 ## Concurrency
 
-_Week 4: to be written._
+### The SPSC queue
+
+[include/orderbook/spsc_queue.hpp](include/orderbook/spsc_queue.hpp) is a lock-free,
+bounded, single-producer single-consumer ring buffer. It is meant to carry messages from a
+feed thread to the matching thread. The interface is:
+
+```cpp
+template <typename T, std::size_t Capacity, bool Padded = true>
+class SpscQueue {
+public:
+    bool try_push(const T& value);   // producer thread only; false if full
+    bool try_pop(T& out);            // consumer thread only; false if empty
+};
+```
+
+- **Indexing.** Capacity must be a power of two, so `index & (Capacity - 1)` replaces a
+  modulo.
+- **Indices only increase.** The fill level is `write - read`, so all `Capacity` slots are
+  usable with no wasted "full" slot. The subtraction stays correct even after the 64-bit
+  counters wrap, because `Capacity` divides 2^64.
+- **Neither call blocks.** Each returns `false` instead, and the caller decides whether to
+  spin, back off or drop.
+
+### Why single-producer is enough
+
+The matching engine is single-threaded by design. Price-time priority needs one total order
+of events, and a single thread applying them in sequence gives that order for free. So there
+is exactly one consumer. With one feed thread there is also exactly one producer.
+
+That means each index has exactly one writer. Each index is therefore a plain atomic load and
+store. Neither thread needs a compare-and-swap or `fetch_add`, which are read-modify-write
+operations that contend for the line under concurrent writers.
+
+### Memory ordering: acquire-release, not seq_cst
+
+The guarantee needed is pairwise, and it has two halves.
+
+1. **Producer to consumer: a slot's contents must be visible before its index is.**
+   - The producer writes the slot, then stores `write_idx_` with `release`.
+   - The consumer loads `write_idx_` with `acquire` before reading the slot.
+   - The release/acquire pair creates a happens-before edge, so the consumer sees the
+     finished write.
+2. **Consumer to producer: a slot must not be reused while it is still being read.**
+   - The consumer reads the slot, then stores `read_idx_` with `release`.
+   - The producer loads `read_idx_` with `acquire` before overwriting that slot.
+
+Index loads by the thread that owns the index are `relaxed`, because no other thread writes
+that index.
+
+`seq_cst` would add a single global order across all `seq_cst` operations on all variables.
+Nothing here needs that: there are only two threads, and each edge runs between one store
+and the load that reads it. `seq_cst` would also cost more on x86. A `seq_cst` store compiles
+to a locked instruction (`xchg`) that acts as a full barrier, while a release store is a plain
+`mov`. I checked this in GCC 11's x86-64 output, but have not measured the timing difference
+in this project.
+
+**Verified with ThreadSanitizer.** The queue tests pass under TSan with no reports. I also
+weakened each of the four acquire/release operations to `relaxed`, one at a time, and TSan
+reported a data race on the slot every time.
+
+The stress test alone could not have caught these. Built without TSan, the broken queues
+passed it 10 times out of 10. x86's hardware memory model is strong enough to hide the
+missing ordering, but the C++ memory model does not guarantee it, and a compiler or a weaker
+CPU (ARM) could break it.
+
+### Index caching
+
+In the naive version, every `try_push` reads the consumer's index and every `try_pop` reads
+the producer's. Each operation therefore pulls the other core's cache line.
+
+In the current version each thread keeps a plain `std::size_t` copy of the other's index:
+
+- **Producer:** keeps `cached_read_`, and reloads `read_idx_` only when the copy says the
+  queue is full.
+- **Consumer:** keeps `cached_write_`, and reloads `write_idx_` only when the copy says it is
+  empty.
+
+**A stale copy is always safe.** The real `read_idx_` only grows, so a stale copy is never
+higher than it. The producer can therefore only see the queue as *fuller* than it really is,
+never emptier. The same argument applies to the consumer, which can only see the queue as
+emptier than it is. The worst case is a spurious reload, never an overwrite or a read of an
+unfilled slot.
+
+### False sharing: measured
+
+Each thread's line holds its own index plus its private copy of the other thread's index.
+With `Padded = true`, these sit on separate 64-byte lines, and the buffer starts on a third.
+`Padded = false` packs them together. The two variants are identical code, so the benchmark
+measures layout alone.
+
+Throughput in M messages/s, median of 7 rounds, two runs each. The threads run on separate
+physical cores. Full data is in [results/benchmarks.md](results/benchmarks.md).
+
+| Version | Padded | Unpadded | Padded / unpadded |
+|---|---:|---:|---:|
+| Naive (reads the other index every op) | 64.1 / 64.5 | 72.0 / 70.7 | 0.89× / 0.91× |
+| Cached (current) | 124.0 / 126.2 | 73.3 / 69.6 | 1.69× / 1.81× |
+
+**Padding only helps once true sharing is removed.** The naive queue really does share both
+indices on every operation, so padding just splits one contended line into two and is slightly
+slower.
+
+Caching removes most of that true sharing. Only false sharing is then left, and padding
+removes it. Together they roughly double throughput.
+
+Either change alone gains nothing measurable. Caching without padding runs at 70–73 vs
+71–72 M msgs/s, because each thread's private copy still shares a line with the other
+thread's index.
+
+This explanation fits all four numbers, but I have not confirmed it with hardware cache-miss
+counters.
+
+### With multiple producers
+
+Several changes would be needed with more than one producer:
+
+1. **Claiming a slot.** A producer could no longer just store `write_idx_`. It would claim a
+   slot with a read-modify-write (`fetch_add` or a compare-and-swap loop) on a shared index.
+   Every producer contends for that cache line.
+2. **Knowing a slot is filled.** Slots can be claimed in one order and filled in another, so
+   `write_idx_` no longer says which slots are ready. The usual fix is a sequence number in
+   each slot, which the consumer checks before reading (Vyukov's bounded MPMC queue). Index
+   caching as done here no longer works directly.
+3. **The alternative.** Give each producer its own SPSC queue and have the matching thread
+   poll them all. The fast path stays as it is, but merging events from several queues into
+   one sequence becomes the consumer's job, and so does fairness between them.
+
+Neither option is implemented or measured here.
 
 ## Testing
 
-_To be written._
+39 GoogleTest tests, run with `ctest`:
+
+| File | Tests | Covers |
+|---|---:|---|
+| [tests/test_matching.cpp](tests/test_matching.cpp) | 17 | add and cancel basics; best bid/ask; rejections (zero quantity, duplicate ID); full and partial fills; fill at the resting order's price; sweeping several levels; time priority within a level; market orders (full fill, partial fill with the remainder dropped, empty book) |
+| [tests/test_edge_cases.cpp](tests/test_edge_cases.cpp) | 18 | cancel after partial or full fill; cancelling a market order's ID; unknown IDs; modify (quantity down keeps priority, quantity up or a price change loses it, a modify that crosses matches immediately, rejections); self-trade prevention (incoming order cancelled, earlier fills kept, applies to market orders and to modify, different or absent owners still trade) |
+| [tests/test_spsc_queue.cpp](tests/test_spsc_queue.cpp) | 4 | empty, full, FIFO order across wraparound; two-thread stress test |
+
+**The stress test** passes 2M messages through a 16-slot queue, so the queue is constantly
+full or empty.
+
+- The consumer requires exactly 0, 1, 2, …, so a lost message shows as a jump forward, a
+  duplicate as a repeat, and reordering as either.
+- Each message is two words that must match, which catches a slot read before it was fully
+  written.
+
+**Sanitizers and assertions**
+
+- **Debug builds** run every test under AddressSanitizer and UndefinedBehaviorSanitizer.
+- **The invariant checker** (`OrderBook::assert_invariants`) runs after every successful add,
+  cancel and modify. It checks five things:
+  1. best bid < best ask;
+  2. there are no empty levels;
+  3. every order sits on the correct side and price, with a positive quantity;
+  4. each level's total equals the sum of its orders;
+  5. the ID index and the levels contain exactly the same orders.
+
+  It is compiled out in Release builds.
+- **The checks are known to fire.** For each one below I built a deliberately broken copy of
+  the code and confirmed the check catches it:
+  - The invariant checker: a partial fill that skips the level total, and a full fill that
+    leaves a stale ID-index entry.
+  - ThreadSanitizer: each of the four queue orderings weakened to `relaxed` (see Concurrency).
+
+**ThreadSanitizer** runs on the queue tests only. GCC 11's TSan runtime crashes at startup on
+recent kernels unless address-space randomisation is disabled. CMake's test discovery runs the
+binary at build time, so a TSan configuration of the main test target fails to build. The
+queue tests are linked and run by hand instead:
+
+```bash
+g++ -std=c++20 -fsanitize=thread -O1 -g -Iinclude -I<googletest>/googletest/include \
+    tests/test_spsc_queue.cpp <tsan-built libgtest_main.a libgtest.a> -pthread -o spsc_tsan
+setarch $(uname -m) -R ./spsc_tsan
+```
+
+**Benchmarks as a cross-check**
+
+- The order book benchmark prints a checksum of every operation's result. The `std::map` and
+  sorted-vector books produced identical checksums over the same 2M operations. Both also ran
+  that stream under ASan/UBSan without errors.
+- The queue benchmark aborts if the consumer's sum is wrong.
 
 ## Limitations
 
-_To be written._
+**Out of scope by design**
+
+- One instrument only.
+- Limit and market orders only. No iceberg, stop, IOC, FOK or other order types.
+- No persistence, recovery, networking or GUI.
+
+**Engine behaviour**
+
+- **The queue is not yet wired to the engine.** It is built and tested on its own, but no
+  program yet runs a feed thread that pushes orders into it for a matching thread.
+- **Some outcomes are silent.** Unfilled market-order quantity is discarded, and an incoming
+  order cancelled by self-trade prevention just stops. In both cases the caller has to infer
+  the result from the returned trades.
+- **Self-trade prevention has one policy: cancel the incoming order.** Orders with
+  `owner == NO_OWNER` (0) are exempt.
+- **No price validation.** Any integer tick is accepted, including zero and negative prices. A
+  market order's price is ignored.
+- **Allocation on the hot path.** New orders and new price levels allocate heap nodes in
+  `std::list`, `std::map` and `std::unordered_map`. Any operation that trades allocates a
+  `std::vector<Trade>`.
+
+**Measurement and tooling**
+
+- **Benchmarks were run under WSL2 on one laptop.** Throughput varies by about ±10% between
+  runs.
+- **Latency figures include about 25 ns of timer overhead.**
+- **The order flow is synthetic.**
+- **The cache-coherence explanations are untested.** Both the sorted-vector result and the
+  false-sharing result are explained by cache behaviour that is consistent with the timings but
+  not confirmed with hardware counters.
+- **ThreadSanitizer is a manual step**, for the reasons given in Testing.
+- **There is no CI yet.**

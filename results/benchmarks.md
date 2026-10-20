@@ -87,6 +87,83 @@ Untested ideas that could change this: keep levels in a stable pool and sort a v
 small `(price, index)` pairs, so shifts move 16 bytes; or index levels directly by tick
 inside a bounded price band.
 
+## SPSC queue: padding and index caching
+
+Reproduce: `./build/bench_spsc [producer_cpu consumer_cpu]`.
+
+[bench/bench_spsc.cpp](../bench/bench_spsc.cpp) passes 50M `uint64_t` messages through a
+`SpscQueue<uint64_t, 1024>`. The producer and consumer spin on `try_push` and `try_pop`. The
+consumer sums what it receives, and the run aborts if the sum is wrong, which would mean a
+message was lost or duplicated.
+
+- **Pinning:** the threads run on CPUs 2 and 4. On this machine CPUs 2k and 2k+1 are
+  hyperthreads of the same physical core, so 2 and 4 are separate cores. Cache lines
+  therefore really cross between cores, through the shared L3.
+- **Rounds:** each run does 7 rounds, alternating padded and unpadded, and reports the median.
+- **Layout is the only difference.** `Padded` is a template parameter, so padded and unpadded
+  run the same code.
+  - Padded: each thread's index sits on its own 64-byte line, and the buffer starts on a
+    further line.
+  - Unpadded: everything is packed together.
+
+I measured two versions of the queue:
+
+1. **Naive:** every `try_push` loads the consumer's `read_idx_`, and every `try_pop` loads the
+   producer's `write_idx_`. It is kept for reference in
+   [bench/spsc_queue_naive.hpp](../bench/spsc_queue_naive.hpp) and is not used in production.
+2. **Cached** (the current code): each thread keeps a plain `std::size_t` copy of the other
+   thread's index, on its own cache line. It reloads the real atomic only when its copy says
+   the queue is full (for the producer) or empty (for the consumer).
+
+Two runs of each, alternating naive and cached, in M messages/s (median of 7 rounds):
+
+| Version | Padded | Unpadded | Padded / unpadded |
+|---|---:|---:|---:|
+| Naive | 64.1 / 64.5 | 72.0 / 70.7 | 0.89× / 0.91× |
+| Cached | 124.0 / 126.2 | 73.3 / 69.6 | 1.69× / 1.81× |
+
+Earlier sessions gave the same picture: the naive queue at 0.92× and 0.95×, and a
+cached prototype at 1.72×.
+
+`sizeof`:
+
+| Version | Padded | Unpadded |
+|---|---:|---:|
+| Naive | 8320 bytes | 8208 bytes |
+| Cached | 8320 bytes | 8224 bytes |
+
+The buffer is 8192 bytes.
+
+### Why padding only helps once true sharing is removed
+
+**Naive version.** Padding does not help, and is 5–11% slower. Every push reads the
+consumer's index and every pop reads the producer's, so each operation needs the other
+core's cache line. That is true sharing: the data really is shared, and no layout can avoid
+the transfer.
+
+Packed onto one line, both indices travel together. Padded onto two lines, each thread
+writes one line and reads the other, so two lines move between the cores instead of one.
+
+**Cached version.** In the common case each thread reads and writes only its own line: its
+own index plus its private copy of the other's. The other thread's line is fetched only when
+the queue looks full or empty. With 1024 slots that happens rarely, so the true sharing is
+mostly gone.
+
+What remains is false sharing:
+
+- **Padded:** no unrelated data shares a line, and throughput roughly doubles over the naive
+  queue (124–126 vs 64 M msgs/s).
+- **Unpadded:** each thread's private variables share a line with the other thread's index,
+  so every write by one thread still invalidates the line the other is using. Caching gains
+  almost nothing there (70–73 vs 71–72 M msgs/s).
+
+The 1.7–1.8× gap between padded and unpadded cached queues is therefore the cost of false
+sharing.
+
+**Caveat on the explanation.** These are throughput measurements. The coherence explanation
+fits all four numbers, but I have not confirmed it with cache-miss counters, which are
+generally unavailable under WSL2.
+
 ## Caveats
 
 - **WSL2 is noisy.** Throughput varies by roughly ±10% between runs; a later `std::map` run
