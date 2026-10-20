@@ -26,3 +26,6 @@ target_link_libraries(orderbook_tests PRIVATE orderbook GTest::gtest_main)
 
 include(GoogleTest)
 gtest_discover_tests(orderbook_tests)
+
+add_executable(bench_orderbook bench/bench_orderbook.cpp)
+target_link_libraries(bench_orderbook PRIVATE orderbook)

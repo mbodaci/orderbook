@@ -41,6 +41,8 @@ private:
 #endif
 
     // Bids sorted high-to-low, asks low-to-high: begin() is the best price on both sides.
+    // std::map beat a sorted vector in results/benchmarks.md: equal on a tight book,
+    // far better p99 on a wide one, because its inserts never move other levels.
     std::map<Price, PriceLevel, std::greater<Price>> bids_;
     std::map<Price, PriceLevel> asks_;
     // The handle points at the resting Order, which carries its side and price,
