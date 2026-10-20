@@ -10,12 +10,21 @@ using Price = std::int64_t;
 using Quantity = std::uint64_t;
 
 enum class Side : std::uint8_t { Buy, Sell };
+enum class OrderType : std::uint8_t { Limit, Market };
 
 struct Order {
     OrderId id;
     Side side;
-    Price price;
+    Price price;        // ignored for market orders
     Quantity quantity;  // remaining, decreases as the order fills
+    OrderType type = OrderType::Limit;
+};
+
+struct Trade {
+    OrderId aggressor_id;
+    OrderId passive_id;
+    Price price;
+    Quantity quantity;
 };
 
 }  // namespace orderbook
