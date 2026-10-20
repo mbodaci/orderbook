@@ -15,6 +15,7 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 cd build && ctest --output-on-failure    # tests
 ./matching_engine [messages]             # feed thread -> SPSC queue -> matching thread
+./matching_engine --input flow.csv --trades trades.csv   # same, fed from a flow file
 ./bench_orderbook                        # benchmarks
 ```
 
@@ -196,16 +197,16 @@ uses `-Wall -Werror`, a message type without a `case` is a compile error.
 queue is first-in first-out, so every earlier message is applied before the matching thread
 reaches it. No separate flag, and no extra memory-ordering argument, is needed.
 
-**The orders** come from a seeded generator: 50% limit adds, 25% cancels, 15% modifies and 10%
-market orders. The generator cannot see the book, so some cancels and modifies target orders
+**The orders** come either from a CSV flow file (`--input`, see Tools) or from a built-in seeded
+generator: 50% limit adds, 25% cancels, 15% modifies and 10% market orders. The generator cannot see the book, so some cancels and modifies target orders
 that have already filled. The book rejects those, and the program counts them.
 
 **At shutdown the program prints** how many messages were applied and rejected, the number of
 trades, the traded volume, and the resting order count.
 
 **It also checks itself.** It applies the same messages again on a single thread, with no
-queue, and requires identical results. That means the same counts, resting order count and
-best prices. The program exits with 1 if anything differs.
+queue, and requires identical results. That means every trade in the same order, the same counts,
+and the same resting order count and best prices. The program exits with 1 if anything differs.
 
 I tested this check by building a version whose feed skips one message. It reported a mismatch
 and exited with 1.
@@ -372,7 +373,9 @@ makes the process exit with code 66.
 **CI** ([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs three jobs on every push and
 pull request to `main`:
 
-1. Release build and tests, then `matching_engine` with 1M messages.
+1. Release build and tests, then `matching_engine` with 1M messages. It then generates a
+   100k-message flow, replays it through the engine, and runs `analyse.py --no-chart`, which
+   fails the job if a consistency check fails or the reference matcher disagrees.
 2. Debug build with all tests under ASan and UBSan. `UBSAN_OPTIONS=halt_on_error=1` is set,
    because UBSan otherwise only prints a warning and the test would still pass.
 3. Debug build with the queue tests under TSan, then `matching_engine` with 5k messages under
@@ -388,6 +391,63 @@ single-threaded replay of the same messages.
   that stream under ASan/UBSan without errors.
 - The queue benchmark aborts if the consumer's sum is wrong.
 
+## Tools
+
+Three Python scripts in [tools/](tools/) run the engine on a flow file and check its output
+independently. `generate_flow.py` and `replay.py` use only the standard library. `analyse.py`
+needs matplotlib for the chart only (`pip install -r tools/requirements.txt`); use
+`--no-chart` to skip it.
+
+```bash
+python3 tools/generate_flow.py flow.csv --messages 200000 --seed 42
+python3 tools/replay.py flow.csv              # writes flow.trades.csv
+python3 tools/analyse.py flow.csv flow.trades.csv
+```
+
+**File format.** CSV with a header row, chosen so that the C++ reader needs no library.
+
+- The flow file has the columns `type,id,side,price,quantity,order_type,owner`.
+  - Fields a message type does not use are left empty: a cancel uses only `id`, and a modify
+    uses `id`, `price` and `quantity`.
+  - The engine rejects a wrong header or a malformed row with the file and line number, and
+    exits with 2.
+- The trades file has the columns `message,aggressor_id,passive_id,price,quantity`. `message`
+  is the 0-based index of the flow message that caused the trade.
+
+**`generate_flow.py`** writes a seeded mix: 50% limit adds, 25% cancels, 15% modifies and 10%
+market orders.
+
+- Unlike the engine's built-in generator, some limit prices cross the mid, so limit orders and
+  modifies also trade when they arrive.
+- Owners are drawn from 0–10, so self-trade prevention is exercised.
+
+**`replay.py`** runs `matching_engine --input <flow> --trades <flow>.trades.csv` and passes on
+the engine's exit code, so the engine's own pipeline self-check still applies.
+
+**`analyse.py`** checks the trades in two independent ways, then charts trade price over the
+flow and traded volume by price:
+
+1. **Consistency checks**, which don't re-run any matching. Every trade must:
+   - come from the order being processed;
+   - have its buyer and seller on opposite sides;
+   - trade at the resting order's price, and not through the incoming order's limit;
+   - not overfill either order;
+   - not involve an order after it was cancelled;
+   - not have the same owner on both sides.
+2. **A reference matcher.** This is a second, deliberately plain implementation of the
+   engine's rules in Python, about 100 lines. Its trades must match the engine's exactly, in
+   the same order.
+
+This is the only check that tests the matching logic itself. The engine's self-check compares
+the engine with itself, so it proves the pipeline is lossless but would agree with a logic bug.
+
+I tested both checks against deliberately broken engines, on a 200k-message flow:
+
+| Bug introduced into the engine | Engine self-check | Consistency checks | Reference matcher |
+|---|---|---|---|
+| Self-trade prevention disabled | passes | 4,500 failures | — |
+| Newest order at a price filled first | passes | pass | first differing trade reported |
+
 ## Limitations
 
 **Out of scope by design**
@@ -398,9 +458,11 @@ single-threaded replay of the same messages.
 
 **Engine behaviour**
 
-- **The feed is synthetic.** `matching_engine` reads no market data or order file; its feed
-  thread replays generated messages. Trades are counted, not published. A real engine would
-  send executions out through a second queue.
+- **The feed is a file or a generator, not a live source.** `matching_engine` reads its
+  messages up front, from a CSV file or its built-in generator, and the feed thread replays
+  them. There is no market-data or network input. Trades are recorded and optionally written
+  to a file after the run, not published while it happens; a real engine would send
+  executions out through a second queue.
 - **Some outcomes are silent.** Unfilled market-order quantity is discarded, and an incoming
   order cancelled by self-trade prevention just stops. In both cases the caller has to infer
   the result from the returned trades.
