@@ -21,7 +21,7 @@ target_include_directories(orderbook PUBLIC ${PROJECT_SOURCE_DIR}/include)
 target_compile_options(orderbook PUBLIC -Wall -Wextra -Werror)
 
 enable_testing()
-add_executable(orderbook_tests tests/test_matching.cpp)
+add_executable(orderbook_tests tests/test_matching.cpp tests/test_edge_cases.cpp)
 target_link_libraries(orderbook_tests PRIVATE orderbook GTest::gtest_main)
 
 include(GoogleTest)

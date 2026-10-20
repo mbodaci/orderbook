@@ -14,6 +14,10 @@ bool crosses(const Order& incoming, Price level_price) {
                                       : level_price >= incoming.price;
 }
 
+bool is_self_trade(const Order& incoming, const Order& resting) {
+    return incoming.owner != NO_OWNER && incoming.owner == resting.owner;
+}
+
 // Templated because bids_ and asks_ have different comparators, hence different types.
 template <typename Levels>
 PriceLevel::Handle rest(Levels& levels, const Order& order) {
@@ -46,6 +50,11 @@ void OrderBook::match(Order& incoming, Levels& opposite, std::vector<Trade>& tra
         // Fill resting orders oldest first
         while (incoming.quantity > 0 && !level.empty()) {
             auto resting = level.front();
+            // Self-trade prevention: cancel the incoming remainder, leave the resting order
+            if (is_self_trade(incoming, *resting)) {
+                incoming.quantity = 0;
+                break;
+            }
             Quantity fill = std::min(incoming.quantity, resting->quantity);
             trades.push_back({incoming.id, resting->id, level.price(), fill});
             incoming.quantity -= fill;
@@ -91,13 +100,41 @@ bool OrderBook::cancel_order(OrderId id) {
     if (it == orders_.end()) {
         return false;
     }
-    if (it->second->side == Side::Buy) {
-        unrest(bids_, it->second);
-    } else {
-        unrest(asks_, it->second);
-    }
+    remove_resting(it->second);
     orders_.erase(it);
     return true;
+}
+
+std::optional<std::vector<Trade>> OrderBook::modify_order(OrderId id, Price new_price,
+                                                          Quantity new_quantity) {
+    auto it = orders_.find(id);
+    if (it == orders_.end() || new_quantity == 0) {
+        return std::nullopt;
+    }
+    auto handle = it->second;
+
+    if (new_price == handle->price && new_quantity <= handle->quantity) {
+        PriceLevel& level =
+            handle->side == Side::Buy ? bids_.at(handle->price) : asks_.at(handle->price);
+        level.reduce(handle, handle->quantity - new_quantity);
+        return std::vector<Trade>{};
+    }
+
+    // Copy before removal invalidates the handle
+    Order replacement = *handle;
+    replacement.price = new_price;
+    replacement.quantity = new_quantity;
+    remove_resting(handle);
+    orders_.erase(it);
+    return add_order(replacement);
+}
+
+void OrderBook::remove_resting(PriceLevel::Handle handle) {
+    if (handle->side == Side::Buy) {
+        unrest(bids_, handle);
+    } else {
+        unrest(asks_, handle);
+    }
 }
 
 std::optional<Quantity> OrderBook::remaining_quantity(OrderId id) const {

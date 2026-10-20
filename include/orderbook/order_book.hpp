@@ -18,6 +18,10 @@ public:
     // accepted with no fills.
     [[nodiscard]] std::optional<std::vector<Trade>> add_order(const Order& order);
     [[nodiscard]] bool cancel_order(OrderId id);
+    // Same return convention as add_order. Shrinking quantity at the same price keeps
+    // time priority; any other change re-adds the order and may match immediately.
+    [[nodiscard]] std::optional<std::vector<Trade>> modify_order(OrderId id, Price new_price,
+                                                                 Quantity new_quantity);
 
     std::optional<Price> best_bid() const;
     std::optional<Price> best_ask() const;
@@ -27,6 +31,7 @@ public:
 private:
     template <typename Levels>
     void match(Order& incoming, Levels& opposite, std::vector<Trade>& trades);
+    void remove_resting(PriceLevel::Handle handle);
 
     // Bids sorted high-to-low, asks low-to-high: begin() is the best price on both sides.
     std::map<Price, PriceLevel, std::greater<Price>> bids_;
