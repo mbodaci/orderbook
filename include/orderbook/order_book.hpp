@@ -14,8 +14,8 @@ namespace orderbook {
 
 class OrderBook {
 public:
-    // nullopt means rejected (zero quantity or duplicate id); an empty vector means
-    // accepted with no fills.
+    // nullopt means rejected: zero quantity, or an id not above every id accepted so far.
+    // An empty vector means accepted with no fills.
     [[nodiscard]] std::optional<std::vector<Trade>> add_order(const Order& order);
     [[nodiscard]] bool cancel_order(OrderId id);
     // Same return convention as add_order. Shrinking quantity at the same price keeps
@@ -29,6 +29,7 @@ public:
     std::optional<Quantity> remaining_quantity(OrderId id) const;
 
 private:
+    std::vector<Trade> place(const Order& order);
     template <typename Levels>
     void match(Order& incoming, Levels& opposite, std::vector<Trade>& trades);
     void remove_resting(PriceLevel::Handle handle);
@@ -48,6 +49,9 @@ private:
     // The handle points at the resting Order, which carries its side and price,
     // so cancel can find the right level without storing anything else.
     std::unordered_map<OrderId, PriceLevel::Handle> orders_;
+    // IDs are unique for the book's lifetime: a new order's id must exceed every id
+    // accepted before it. Advanced only by add_order, and only on acceptance.
+    OrderId highest_id_ = 0;
 };
 
 }  // namespace orderbook

@@ -193,3 +193,74 @@ TEST(SelfTradePrevention, OrdersWithoutOwnerAlwaysTrade) {
     ASSERT_TRUE(trades);
     EXPECT_EQ(*trades, (std::vector<Trade>{{2, 1, 100, 5}}));
 }
+
+TEST(OrderIds, ReuseAfterFullFillIsRejected) {
+    OrderBook book;
+    ASSERT_TRUE(book.add_order({1, Side::Sell, 100, 10}));
+    ASSERT_TRUE(book.add_order({2, Side::Buy, 100, 10}));
+    ASSERT_EQ(book.order_count(), 0u);
+
+    EXPECT_FALSE(book.add_order({1, Side::Sell, 100, 5}));
+    EXPECT_EQ(book.order_count(), 0u);
+}
+
+TEST(OrderIds, ReuseAfterCancelIsRejected) {
+    OrderBook book;
+    ASSERT_TRUE(book.add_order({1, Side::Buy, 100, 10}));
+    ASSERT_TRUE(book.cancel_order(1));
+
+    EXPECT_FALSE(book.add_order({1, Side::Buy, 100, 10}));
+    EXPECT_EQ(book.order_count(), 0u);
+}
+
+TEST(OrderIds, UnusedIdBelowHighestIsRejected) {
+    OrderBook book;
+    ASSERT_TRUE(book.add_order({5, Side::Buy, 100, 10}));
+
+    EXPECT_FALSE(book.add_order({3, Side::Buy, 99, 10}));
+    EXPECT_EQ(book.order_count(), 1u);
+    EXPECT_EQ(book.best_bid(), 100);
+}
+
+TEST(OrderIds, IncreasingIdsWithGapsAreAccepted) {
+    OrderBook book;
+    EXPECT_TRUE(book.add_order({1, Side::Buy, 100, 10}));
+    EXPECT_TRUE(book.add_order({10, Side::Buy, 99, 10}));
+    EXPECT_TRUE(book.add_order({11, Side::Sell, 105, 10}));
+    EXPECT_EQ(book.order_count(), 3u);
+}
+
+TEST(OrderIds, RejectedAddDoesNotAdvanceHighestId) {
+    OrderBook book;
+    ASSERT_TRUE(book.add_order({1, Side::Buy, 100, 10}));
+    ASSERT_FALSE(book.add_order({5, Side::Buy, 100, 0}));
+
+    // Had the zero-quantity add advanced the mark to 5, both of these would be rejected
+    EXPECT_TRUE(book.add_order({2, Side::Buy, 99, 10}));
+    EXPECT_TRUE(book.add_order({5, Side::Buy, 98, 10}));
+    EXPECT_EQ(book.order_count(), 3u);
+}
+
+TEST(OrderIds, PriceChangeModifyKeepsIdBelowHighest) {
+    OrderBook book;
+    ASSERT_TRUE(book.add_order({1, Side::Sell, 101, 5}));
+    ASSERT_TRUE(book.add_order({2, Side::Sell, 102, 5}));
+
+    // Re-adds order 1 although 2 is the highest id accepted
+    auto modified = book.modify_order(1, 103, 5);
+    ASSERT_TRUE(modified);
+    EXPECT_TRUE(modified->empty());
+    EXPECT_EQ(book.remaining_quantity(1), 5u);
+    EXPECT_EQ(book.best_ask(), 102);
+}
+
+TEST(OrderIds, QuantityUpModifyKeepsIdBelowHighest) {
+    OrderBook book;
+    ASSERT_TRUE(book.add_order({1, Side::Buy, 100, 5}));
+    ASSERT_TRUE(book.add_order({2, Side::Buy, 100, 5}));
+
+    auto modified = book.modify_order(1, 100, 8);
+    ASSERT_TRUE(modified);
+    EXPECT_EQ(book.remaining_quantity(1), 8u);
+    EXPECT_EQ(book.order_count(), 2u);
+}

@@ -319,12 +319,12 @@ Neither option is implemented or measured here.
 
 ## Testing
 
-39 GoogleTest tests, run with `ctest`:
+46 GoogleTest tests, run with `ctest`:
 
 | File | Tests | Covers |
 |---|---:|---|
 | [tests/test_matching.cpp](tests/test_matching.cpp) | 17 | add and cancel basics; best bid/ask; rejections (zero quantity, duplicate ID); full and partial fills; fill at the resting order's price; sweeping several levels; time priority within a level; market orders (full fill, partial fill with the remainder dropped, empty book) |
-| [tests/test_edge_cases.cpp](tests/test_edge_cases.cpp) | 18 | cancel after partial or full fill; cancelling a market order's ID; unknown IDs; modify (quantity down keeps priority, quantity up or a price change loses it, a modify that crosses matches immediately, rejections); self-trade prevention (incoming order cancelled, earlier fills kept, applies to market orders and to modify, different or absent owners still trade) |
+| [tests/test_edge_cases.cpp](tests/test_edge_cases.cpp) | 25 | cancel after partial or full fill; cancelling a market order's ID; unknown IDs; modify (quantity down keeps priority, quantity up or a price change loses it, a modify that crosses matches immediately, rejections); self-trade prevention (incoming order cancelled, earlier fills kept, applies to market orders and to modify, different or absent owners still trade); order IDs (no reuse after a fill or a cancel, no unused ID below the highest, gaps allowed, a rejected add doesn't advance the mark, a modify keeps its ID) |
 | [tests/test_spsc_queue.cpp](tests/test_spsc_queue.cpp) | 4 | empty, full, FIFO order across wraparound; two-thread stress test |
 
 **The stress test** passes 2M messages through a 16-slot queue, so the queue is constantly
@@ -466,6 +466,14 @@ I tested both checks against deliberately broken engines, on a 200k-message flow
 - **Some outcomes are silent.** Unfilled market-order quantity is discarded, and an incoming
   order cancelled by self-trade prevention just stops. In both cases the caller has to infer
   the result from the returned trades.
+- **Order IDs must increase.**
+  - IDs are unique for the book's lifetime: `add_order` rejects any ID at or below the highest
+    one accepted so far. So an ID can't be reused after its order fills or is cancelled, and the
+    trade log never shows two orders under one ID.
+  - A modify that re-adds an order keeps its ID.
+  - The caller has to assign IDs in increasing order, as a venue assigning its own order IDs
+    would. A book that takes IDs chosen by clients directly would need a set of every ID it has
+    seen instead.
 - **Self-trade prevention has one policy: cancel the incoming order.** Orders with
   `owner == NO_OWNER` (0) are exempt.
 - **No price validation.** Any integer tick is accepted, including zero and negative prices. A

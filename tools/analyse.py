@@ -44,6 +44,7 @@ def check_invariants(flow, trades):
     errors = []
     orders = {}        # id -> {"side", "price", "owner", "remaining"} as last added or modified
     cancelled = set()
+    highest_id = 0     # adds must use an id above every accepted one
     by_message = {}
     previous = -1
     for trade in trades:
@@ -61,6 +62,11 @@ def check_invariants(flow, trades):
             continue
 
         if msg["type"] == "add":
+            if msg["quantity"] == 0 or msg["id"] <= highest_id:
+                if fills:
+                    errors.append(f"message {index}: rejected add of id {msg['id']} traded")
+                continue
+            highest_id = msg["id"]
             side, owner = msg["side"], msg["owner"]
             limit = msg["price"] if msg["order_type"] == "limit" else None
         elif msg["id"] in orders:
@@ -118,6 +124,7 @@ class ReferenceBook:
         self.prices = {"buy": [], "sell": []}   # sorted ascending
         self.orders = {}                        # id -> entry, resting orders only
         self.trades = []
+        self.highest_id = 0                     # new ids must exceed every accepted id
 
     def best_level(self, side):
         prices = self.prices[side]
@@ -159,8 +166,13 @@ class ReferenceBook:
         return quantity
 
     def add(self, index, order_id, side, price, quantity, order_type, owner):
-        if quantity == 0 or order_id in self.orders:
+        if quantity == 0 or order_id <= self.highest_id:
             return
+        self.highest_id = order_id
+        self.place(index, order_id, side, price, quantity, order_type, owner)
+
+    # Matches and rests an order whose id is already accepted; modify re-adds through here
+    def place(self, index, order_id, side, price, quantity, order_type, owner):
         limit = price if order_type == "limit" else None
         remaining = self.match(index, order_id, side, limit, quantity, owner)
         if remaining > 0 and order_type == "limit":
@@ -185,7 +197,7 @@ class ReferenceBook:
             entry[REMAINING] = quantity
             return
         self.cancel(order_id)
-        self.add(index, order_id, entry[SIDE], price, quantity, "limit", entry[OWNER])
+        self.place(index, order_id, entry[SIDE], price, quantity, "limit", entry[OWNER])
 
 
 def reference_trades(flow):

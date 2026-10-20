@@ -112,11 +112,18 @@ void OrderBook::match(Order& incoming, Levels& opposite, std::vector<Trade>& tra
     }
 }
 
+// Every resting id is at or below highest_id_, so this also rejects resting duplicates
 std::optional<std::vector<Trade>> OrderBook::add_order(const Order& order) {
-    if (order.quantity == 0 || orders_.contains(order.id)) {
+    if (order.quantity == 0 || order.id <= highest_id_) {
         return std::nullopt;
     }
+    highest_id_ = order.id;
+    return place(order);
+}
 
+// Matches and rests an order whose id is already accepted. modify_order re-adds through
+// here, so an order keeps its id without tripping the uniqueness check.
+std::vector<Trade> OrderBook::place(const Order& order) {
     std::vector<Trade> trades;
     Order remaining = order;
     if (remaining.side == Side::Buy) {
@@ -168,8 +175,8 @@ std::optional<std::vector<Trade>> OrderBook::modify_order(OrderId id, Price new_
     replacement.quantity = new_quantity;
     remove_resting(handle);
     orders_.erase(it);
-    // add_order checks the invariants once the replacement is in
-    return add_order(replacement);
+    // place checks the invariants once the replacement is in
+    return place(replacement);
 }
 
 void OrderBook::remove_resting(PriceLevel::Handle handle) {
