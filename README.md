@@ -315,16 +315,30 @@ full or empty.
     leaves a stale ID-index entry.
   - ThreadSanitizer: each of the four queue orderings weakened to `relaxed` (see Concurrency).
 
-**ThreadSanitizer** runs on the queue tests only. GCC 11's TSan runtime crashes at startup on
-recent kernels unless address-space randomisation is disabled. CMake's test discovery runs the
-binary at build time, so a TSan configuration of the main test target fails to build. The
-queue tests are linked and run by hand instead:
+**ThreadSanitizer** runs on the queue tests only. The TSan runtime cannot start under the
+address-space randomisation of recent kernels.
+
+A plain TSan build fails to build, not just to run, because CMake's test discovery runs the
+test binary at build time. `CMAKE_CROSSCOMPILING_EMULATOR` fixes this: CMake then runs every
+test binary through `setarch -R`, which disables randomisation, both during discovery and under
+`ctest`.
 
 ```bash
-g++ -std=c++20 -fsanitize=thread -O1 -g -Iinclude -I<googletest>/googletest/include \
-    tests/test_spsc_queue.cpp <tsan-built libgtest_main.a libgtest.a> -pthread -o spsc_tsan
-setarch $(uname -m) -R ./spsc_tsan
+cmake -S . -B build-tsan -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_FLAGS="-fsanitize=thread" \
+  "-DCMAKE_CROSSCOMPILING_EMULATOR=setarch;x86_64;-R"
+cmake --build build-tsan && ctest --test-dir build-tsan --output-on-failure -R "^SpscQueue\."
 ```
+
+GoogleTest still prints PASSED when TSan finds a race. The test fails anyway, because TSan
+makes the process exit with code 66.
+
+**CI** ([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs three jobs on every push and
+pull request to `main`:
+
+1. Release build and tests.
+2. Debug build with all tests under ASan and UBSan. `UBSAN_OPTIONS=halt_on_error=1` is set,
+   because UBSan otherwise only prints a warning and the test would still pass.
+3. Debug build with the queue tests under TSan.
 
 **Benchmarks as a cross-check**
 
@@ -365,5 +379,4 @@ setarch $(uname -m) -R ./spsc_tsan
 - **The cache-coherence explanations are untested.** Both the sorted-vector result and the
   false-sharing result are explained by cache behaviour that is consistent with the timings but
   not confirmed with hardware counters.
-- **ThreadSanitizer is a manual step**, for the reasons given in Testing.
-- **There is no CI yet.**
+- **ThreadSanitizer covers only the queue tests.** The order book is single-threaded.
