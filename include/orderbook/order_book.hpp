@@ -22,6 +22,7 @@ public:
     std::optional<Price> best_bid() const;
     std::optional<Price> best_ask() const;
     std::size_t order_count() const { return orders_.size(); }
+    std::optional<Quantity> remaining_quantity(OrderId id) const;
 
 private:
     template <typename Levels>

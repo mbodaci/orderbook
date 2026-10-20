@@ -25,6 +25,8 @@ struct Trade {
     OrderId passive_id;
     Price price;
     Quantity quantity;
+
+    bool operator==(const Trade&) const = default;
 };
 
 }  // namespace orderbook

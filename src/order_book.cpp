@@ -100,6 +100,14 @@ bool OrderBook::cancel_order(OrderId id) {
     return true;
 }
 
+std::optional<Quantity> OrderBook::remaining_quantity(OrderId id) const {
+    auto it = orders_.find(id);
+    if (it == orders_.end()) {
+        return std::nullopt;
+    }
+    return it->second->quantity;
+}
+
 std::optional<Price> OrderBook::best_bid() const {
     if (bids_.empty()) {
         return std::nullopt;
