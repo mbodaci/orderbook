@@ -1,3 +1,5 @@
+[![CI](https://github.com/mbodaci/orderbook/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/mbodaci/orderbook/actions/workflows/ci.yml)
+
 # Order Book
 
 A single-instrument limit order book and matching engine in C++20. It supports limit and
