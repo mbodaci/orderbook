@@ -22,6 +22,9 @@ jobs:
         run: cmake --build build --parallel
       - name: Test
         run: ctest --test-dir build --output-on-failure
+      # Exits non-zero if the threaded pipeline disagrees with a single-threaded replay
+      - name: End-to-end pipeline
+        run: ./build/matching_engine 1000000
 
   asan-ubsan:
     name: Debug build, ASan + UBSan
@@ -57,3 +60,7 @@ jobs:
         run: cmake --build build --parallel
       - name: Test
         run: ctest --test-dir build --output-on-failure -R "^SpscQueue\."
+      # Small count: this is a Debug build, so the invariant checker walks the whole book
+      # after every message. A race makes TSan exit with 66 and fails the step.
+      - name: End-to-end pipeline under TSan
+        run: setarch x86_64 -R ./build/matching_engine 5000

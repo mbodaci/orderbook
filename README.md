@@ -14,6 +14,7 @@ build under WSL). GoogleTest is downloaded at configure time.
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 cd build && ctest --output-on-failure    # tests
+./matching_engine [messages]             # feed thread -> SPSC queue -> matching thread
 ./bench_orderbook                        # benchmarks
 ```
 
@@ -174,6 +175,40 @@ public:
   counters wrap, because `Capacity` divides 2^64.
 - **Neither call blocks.** Each returns `false` instead, and the caller decides whether to
   spin, back off or drop.
+
+### The pipeline: src/main.cpp
+
+[src/main.cpp](src/main.cpp) connects a feed thread to the matching thread through a
+`SpscQueue<Message, 1024>`. The two threads are pinned to separate physical cores, and both
+busy-spin while the queue is full or empty.
+
+**The message** is a tagged struct: `enum class MsgType { Add, Cancel, Modify, Shutdown }` plus
+an `Order`.
+
+- A cancel reads only the order ID.
+- A modify reads the ID, plus the price and quantity as the new values.
+- A market order is an `Add` whose order has `type = Market`.
+
+The matching thread dispatches with a `switch` that has no `default` case. Because the build
+uses `-Wall -Werror`, a message type without a `case` is a compile error.
+
+**Shutdown is a message on the queue.** The feed pushes `Shutdown` after its last order. The
+queue is first-in first-out, so every earlier message is applied before the matching thread
+reaches it. No separate flag, and no extra memory-ordering argument, is needed.
+
+**The orders** come from a seeded generator: 50% limit adds, 25% cancels, 15% modifies and 10%
+market orders. The generator cannot see the book, so some cancels and modifies target orders
+that have already filled. The book rejects those, and the program counts them.
+
+**At shutdown the program prints** how many messages were applied and rejected, the number of
+trades, the traded volume, and the resting order count.
+
+**It also checks itself.** It applies the same messages again on a single thread, with no
+queue, and requires identical results. That means the same counts, resting order count and
+best prices. The program exits with 1 if anything differs.
+
+I tested this check by building a version whose feed skips one message. It reported a mismatch
+and exited with 1.
 
 ### Why single-producer is enough
 
@@ -337,10 +372,14 @@ makes the process exit with code 66.
 **CI** ([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs three jobs on every push and
 pull request to `main`:
 
-1. Release build and tests.
+1. Release build and tests, then `matching_engine` with 1M messages.
 2. Debug build with all tests under ASan and UBSan. `UBSAN_OPTIONS=halt_on_error=1` is set,
    because UBSan otherwise only prints a warning and the test would still pass.
-3. Debug build with the queue tests under TSan.
+3. Debug build with the queue tests under TSan, then `matching_engine` with 5k messages under
+   TSan. The count is small because the invariant checker runs after every message.
+
+Both `matching_engine` runs fail the job if the threaded pipeline's result differs from a
+single-threaded replay of the same messages.
 
 **Benchmarks as a cross-check**
 
@@ -359,8 +398,9 @@ pull request to `main`:
 
 **Engine behaviour**
 
-- **The queue is not yet wired to the engine.** It is built and tested on its own, but no
-  program yet runs a feed thread that pushes orders into it for a matching thread.
+- **The feed is synthetic.** `matching_engine` reads no market data or order file; its feed
+  thread replays generated messages. Trades are counted, not published. A real engine would
+  send executions out through a second queue.
 - **Some outcomes are silent.** Unfilled market-order quantity is discarded, and an incoming
   order cancelled by self-trade prevention just stops. In both cases the caller has to infer
   the result from the returned trades.

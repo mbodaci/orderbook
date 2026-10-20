@@ -30,6 +30,9 @@ target_link_libraries(orderbook_tests PRIVATE orderbook GTest::gtest_main Thread
 include(GoogleTest)
 gtest_discover_tests(orderbook_tests)
 
+add_executable(matching_engine src/main.cpp)
+target_link_libraries(matching_engine PRIVATE orderbook Threads::Threads)
+
 add_executable(bench_orderbook bench/bench_orderbook.cpp)
 target_link_libraries(bench_orderbook PRIVATE orderbook)
 
