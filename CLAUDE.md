@@ -52,6 +52,9 @@ Sparse and purposeful. Follow these rules:
 - 4-space indentation, no tabs
 - Max line length: 100 characters
 
+### Other rules
+- No using namespace std — use explicit std:: prefixes. No emojis anywhere.
+
 ## Scope control
 If I am adding something not in the spec, push back. Features are cut before
 tests, benchmarks or the README.
