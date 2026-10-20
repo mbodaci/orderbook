@@ -227,6 +227,8 @@ modify that re-adds the order is checked inside `add_order`.
     usable, and the unsigned subtraction stays correct even after a wrap, because `Capacity`
     divides 2^64.
   - `static_assert(std::atomic<std::size_t>::is_always_lock_free)`.
+  - `static_assert(std::is_trivially_copyable_v<T>)`: slots are overwritten by assignment and
+    never destroyed on pop, so element types that own resources are rejected at compile time.
 - **`try_push`:**
   1. Relaxed load of its own `write_idx_`.
   2. If `write - cached_read_ == Capacity`, reload `cached_read_` from `read_idx_` with
@@ -765,10 +767,14 @@ These are true of the current code. Better to raise them yourself than to be cau
     order, but its memory grows without bound.
   - **Cost:** one comparison and 8 bytes of state.
   - **Corollary:** ID 0 can never be used, because the mark starts at 0.
-- **No exception safety.** If an allocation throws partway through `add_order`, for example
-  `orders_.emplace` after the order has been rested, the book is left inconsistent: an order
-  rests with no index entry. The engine assumes allocation succeeds. Fixes would be to reserve
-  up front, use a pool, or reorder the steps so the failure-prone one comes first.
+- **No exception safety.** The engine assumes allocation succeeds. If an allocation throws
+  partway through an operation, the book can be left inconsistent, in one of three windows:
+  1. an empty level, left behind when a new level was created but the list node then failed;
+  2. a resting order with no index entry, when `orders_.emplace` fails after the rest;
+  3. fills already applied to the book, when `trades.push_back` fails during matching, so the
+     caller gets an exception instead of those trades.
+
+  See 6a for the fixes.
 - **Allocation on the hot path.** A list node per order, a map node per new level, a hash node
   per resting order, and a vector for any call that trades.
 - **Some outcomes are silent.** Discarded market-order quantity and self-trade-prevention
@@ -780,8 +786,9 @@ These are true of the current code. Better to raise them yourself than to be cau
   tests) and end to end by the reference matcher.
 - **The queue never destroys popped objects.** Slots are default-constructed and overwritten
   by assignment, so a popped value stays in its slot until it's overwritten or the queue is
-  destroyed. That's fine for the trivially copyable `Message`; it would matter for a type that
-  owns resources.
+  destroyed. That's fine for the trivially copyable `Message`, and it's enforced: a
+  `static_assert(std::is_trivially_copyable_v<T>)` in `SpscQueue` rejects any element type that
+  owns resources at compile time.
 - **Busy-spinning burns two cores.** That's right for latency on dedicated hardware, and wrong
   on a shared machine. The alternatives are spinning then yielding, or a futex or condition
   variable for the idle case.
@@ -801,31 +808,55 @@ reasoning, name the condition under which you'd decide differently, and stop. Do
 **No exception safety.**
 
 > The only places that can throw are the allocations: a `std::map` node when a new price level
-> appears, a `std::list` node per order, and a hash-map node per resting order. In a
+> appears, a `std::list` node per order, a hash-map node per resting order, and the trade
+> vector growing during a match. In a
 > single-threaded engine processing a trusted feed, a `bad_alloc` means the machine is out of
 > memory, and there's no meaningful recovery from that in-process — the engine is done either
 > way. So I didn't pay for the strong exception guarantee, because here it buys nothing: the
 > complexity of making every operation roll back cleanly would protect against a failure mode
 > that already means the process dies. If this were a library other code depended on, or if it
-> had to survive allocation failure and keep serving, I'd add it — reserve the containers up
-> front, or reorder each operation so the allocating step happens before any state is mutated,
-> so a throw leaves the book untouched.
+> had to survive allocation failure and keep serving, I'd add it. I'd make each operation do
+> its allocating steps before it changes the book, roll back on failure, or take the allocator
+> off the hot path entirely with node pools.
 
 The interviewer is testing whether you *understand* exception safety, not whether you sprayed
 `try`/`catch` everywhere. The strong answer reasons about the guarantee and the cost; the weak
 answer is "I'd wrap it in try/catch."
 
-If pushed on "so your book can be left inconsistent?" — agree plainly, and be specific: the one
-window is an order resting in a level with no matching entry in the ID index, if the index
-insert throws after the rest. Name the fix (do the index insert first, then rest), and note it's
-a few lines. Knowing the exact window is the point.
+If pushed on "so your book can be left inconsistent?", agree plainly, and be specific. There
+are three windows:
+
+1. **An empty level.** `rest()` creates a new level with `try_emplace`, then allocates the list
+   node. If that second allocation throws, an empty level is left in the map.
+2. **An order with no index entry.** `orders_.emplace` runs after the order has rested. If it
+   throws, the order sits in a level with no entry in the ID index.
+3. **Unreported fills.** `trades.push_back` runs during matching, after earlier fills have
+   already changed the book. If it throws, the book reflects those fills but the caller gets an
+   exception instead of the trades.
+
+For the index window, don't say "do the index insert first". The handle stored in `orders_` is
+a list iterator, and it only exists after the order rests. The real options:
+
+- **Insert a placeholder first.** Insert the ID with a placeholder value before resting; that
+  allocation happens while the book is untouched. After resting, assign the real handle, which
+  doesn't allocate. If resting throws, erase the placeholder, which can't throw.
+- **Undo on failure.** Catch a failed index insert and undo the rest: remove the order, and
+  erase its level if it's now empty.
+- **Remove the allocation.** Note that `orders_.reserve()` alone does *not* do this. It
+  pre-sizes the bucket array, so inserts won't rehash, but `std::unordered_map` still allocates
+  a node for every element. An insert that can't allocate needs a node pool (a custom
+  allocator) or an open-addressing hash map.
+
+The first two are a few lines each. Knowing the exact windows, and why the obvious one-line fix
+doesn't work, is the point.
 
 **The queue never runs destructors on popped values.**
 
 > The ring buffer's slots are default-constructed once, and a pop reads the value out and leaves
 > the slot as-is until the next write overwrites it by assignment. That's correct for `Message`,
-> which is trivially copyable and owns nothing — there's nothing to destroy. It's a documented
-> constraint on `T`, not a leak: the queue requires a trivially copyable element type. If I
+> which is trivially copyable and owns nothing — there's nothing to destroy. It's a constraint
+> on `T`, not a leak, and the code enforces it: a `static_assert(std::is_trivially_copyable_v<T>)`
+> at the top of the queue makes any other element type a compile error. If I
 > needed it to carry a type that owns a resource — a buffer, a handle — I'd run the destructor
 > on pop, or store the slots as raw storage and placement-new / explicit-destroy each element.
 > For a message type that's deliberately a flat POD, the simpler design is the right one.
@@ -834,9 +865,10 @@ This is the cleanest of the three, because it's genuinely not a bug — it's a p
 `T` that `Message` satisfies. Say that it's a constraint, not a defect, and that you know what
 would change the decision (a resource-owning element type).
 
-If pushed on "how would you enforce the constraint?" — a `static_assert(std::is_trivially_
-copyable_v<T>)` at the top of the queue makes the precondition a compile error instead of a
-convention. If you haven't added one, say you'd add one; it's one line and it's the honest fix.
+If pushed on "how is that constraint enforced?", it's a compile-time check, not a convention.
+`SpscQueue` has `static_assert(std::is_trivially_copyable_v<T>, "SpscQueue requires a trivially
+copyable element type")`, and instantiating it with, for example, `std::string` fails to
+compile with that message.
 
 **The CSV parser's error paths were checked by hand, not by unit tests.**
 

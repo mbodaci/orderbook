@@ -3,6 +3,7 @@
 #include <array>
 #include <atomic>
 #include <cstddef>
+#include <type_traits>
 
 namespace orderbook {
 
@@ -18,6 +19,9 @@ class SpscQueue {
     static_assert(Capacity > 0 && (Capacity & (Capacity - 1)) == 0,
                   "Capacity must be a power of two so index & MASK replaces modulo");
     static_assert(std::atomic<std::size_t>::is_always_lock_free);
+    // Slots are overwritten by assignment and never destroyed on pop
+    static_assert(std::is_trivially_copyable_v<T>,
+                  "SpscQueue requires a trivially copyable element type");
 
 public:
     [[nodiscard]] bool try_push(const T& value) {
