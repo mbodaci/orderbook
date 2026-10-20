@@ -33,6 +33,13 @@ private:
     void match(Order& incoming, Levels& opposite, std::vector<Trade>& trades);
     void remove_resting(PriceLevel::Handle handle);
 
+    // O(n) full-book check after every mutation; an empty inline in Release builds.
+#ifndef NDEBUG
+    void assert_invariants() const;
+#else
+    void assert_invariants() const {}
+#endif
+
     // Bids sorted high-to-low, asks low-to-high: begin() is the best price on both sides.
     std::map<Price, PriceLevel, std::greater<Price>> bids_;
     std::map<Price, PriceLevel> asks_;

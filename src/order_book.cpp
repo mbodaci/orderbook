@@ -1,6 +1,7 @@
 #include "orderbook/order_book.hpp"
 
 #include <algorithm>
+#include <cassert>
 
 namespace orderbook {
 
@@ -34,7 +35,45 @@ void unrest(Levels& levels, PriceLevel::Handle handle) {
     }
 }
 
+#ifndef NDEBUG
+// Checks one side and returns how many orders it holds.
+template <typename Levels, typename Index>
+std::size_t check_side(const Levels& levels, Side side, const Index& index) {
+    std::size_t count = 0;
+    for (const auto& [price, level] : levels) {
+        assert(!level.empty());
+        assert(level.price() == price);
+        Quantity total = 0;
+        for (const Order& order : level.orders()) {
+            assert(order.side == side);
+            assert(order.price == price);
+            assert(order.quantity > 0);
+            // The index entry for this id must point at this exact element
+            auto it = index.find(order.id);
+            assert(it != index.end() && &*it->second == &order);
+            total += order.quantity;
+            ++count;
+        }
+        assert(total == level.total_quantity());
+    }
+    return count;
+}
+#endif
+
 }  // namespace
+
+#ifndef NDEBUG
+void OrderBook::assert_invariants() const {
+    if (!bids_.empty() && !asks_.empty()) {
+        assert(bids_.begin()->first < asks_.begin()->first);
+    }
+    // Every resting order maps to its own index entry, and the counts match,
+    // so every index entry is reachable through the levels.
+    std::size_t resting = check_side(bids_, Side::Buy, orders_)
+                          + check_side(asks_, Side::Sell, orders_);
+    assert(resting == orders_.size());
+}
+#endif
 
 // Defined here rather than in the header: it is only ever instantiated in this file.
 template <typename Levels>
@@ -92,6 +131,7 @@ std::optional<std::vector<Trade>> OrderBook::add_order(const Order& order) {
                                                   : rest(asks_, remaining);
         orders_.emplace(remaining.id, handle);
     }
+    assert_invariants();
     return trades;
 }
 
@@ -102,6 +142,7 @@ bool OrderBook::cancel_order(OrderId id) {
     }
     remove_resting(it->second);
     orders_.erase(it);
+    assert_invariants();
     return true;
 }
 
@@ -117,6 +158,7 @@ std::optional<std::vector<Trade>> OrderBook::modify_order(OrderId id, Price new_
         PriceLevel& level =
             handle->side == Side::Buy ? bids_.at(handle->price) : asks_.at(handle->price);
         level.reduce(handle, handle->quantity - new_quantity);
+        assert_invariants();
         return std::vector<Trade>{};
     }
 
@@ -126,6 +168,7 @@ std::optional<std::vector<Trade>> OrderBook::modify_order(OrderId id, Price new_
     replacement.quantity = new_quantity;
     remove_resting(handle);
     orders_.erase(it);
+    // add_order checks the invariants once the replacement is in
     return add_order(replacement);
 }
 

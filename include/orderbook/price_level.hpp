@@ -42,6 +42,7 @@ public:
     bool empty() const { return orders_.empty(); }
     Price price() const { return price_; }
     Quantity total_quantity() const { return total_quantity_; }
+    const std::list<Order>& orders() const { return orders_; }
 
 private:
     Price price_;
