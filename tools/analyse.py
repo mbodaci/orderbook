@@ -17,11 +17,12 @@ def to_int(field):
     return int(field) if field != "" else None
 
 
-def read_csv(path, header):
+def read_csv(path, *headers):
     with open(path, newline="") as f:
         reader = csv.reader(f)
-        if next(reader, None) != header:
-            sys.exit(f"{path}: expected header {','.join(header)}")
+        if next(reader, None) not in headers:
+            expected = " or ".join(",".join(header) for header in headers)
+            sys.exit(f"{path}: expected header {expected}")
         return list(reader)
 
 
@@ -34,8 +35,10 @@ def read_flow(path):
     return messages
 
 
+# An optional trailing venue column labels the run and plays no part in matching, so it is dropped
 def read_trades(path):
-    return [tuple(int(field) for field in row) for row in read_csv(path, TRADES_HEADER)]
+    rows = read_csv(path, TRADES_HEADER, TRADES_HEADER + ["venue"])
+    return [tuple(int(field) for field in row[:len(TRADES_HEADER)]) for row in rows]
 
 
 # Properties every trade must have, checked without re-running the matching logic.

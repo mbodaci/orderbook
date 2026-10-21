@@ -34,6 +34,12 @@ jobs:
       # Fails if the trades break a consistency check or differ from the reference matcher
       - name: Analyse trades
         run: python3 tools/analyse.py build/flow.csv build/flow.trades.csv --no-chart
+      # Same flow labelled with a venue: analyse.py must accept both trades header forms
+      - name: Replay and analyse with a venue column
+        run: |
+          python3 tools/replay.py build/flow.csv --engine build/matching_engine \
+            --venue SIM --trades build/flow.venue.trades.csv
+          python3 tools/analyse.py build/flow.csv build/flow.venue.trades.csv --no-chart
 
   asan-ubsan:
     name: Debug build, ASan + UBSan

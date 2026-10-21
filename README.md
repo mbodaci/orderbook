@@ -16,6 +16,7 @@ cmake --build build
 cd build && ctest --output-on-failure    # tests
 ./matching_engine [messages]             # feed thread -> SPSC queue -> matching thread
 ./matching_engine --input flow.csv --trades trades.csv   # same, fed from a flow file
+./matching_engine --input flow.csv --trades trades.csv --venue SIM   # adds a venue column
 ./bench_orderbook                        # benchmarks
 ```
 
@@ -413,6 +414,9 @@ python3 tools/analyse.py flow.csv flow.trades.csv
     exits with 2.
 - The trades file has the columns `message,aggressor_id,passive_id,price,quantity`. `message`
   is the 0-based index of the flow message that caused the trade.
+  - With `--venue CODE` (uppercase letters and digits), a trailing `venue` column carries that
+    code on every row. It labels the run, not each trade: the engine still matches a single
+    venue. Without the flag, the file is unchanged.
 
 **`generate_flow.py`** writes a seeded mix: 50% limit adds, 25% cancels, 15% modifies and 10%
 market orders.
@@ -422,7 +426,8 @@ market orders.
 - Owners are drawn from 0–10, so self-trade prevention is exercised.
 
 **`replay.py`** runs `matching_engine --input <flow> --trades <flow>.trades.csv` and passes on
-the engine's exit code, so the engine's own pipeline self-check still applies.
+the engine's exit code, so the engine's own pipeline self-check still applies. `--venue` is
+passed through to the engine; `analyse.py` accepts trades files with or without the column.
 
 **`analyse.py`** checks the trades in two independent ways, then charts trade price over the
 flow and traded volume by price:

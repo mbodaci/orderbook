@@ -1,6 +1,7 @@
 #include <pthread.h>
 #include <sched.h>
 
+#include <algorithm>
 #include <array>
 #include <charconv>
 #include <chrono>
@@ -67,6 +68,7 @@ struct Options {
     std::size_t count = DEFAULT_MESSAGES;
     std::string input;   // empty: generate messages in-process
     std::string trades;  // empty: do not write trades
+    std::string venue;   // empty: trades file has no venue column
 };
 
 // The feed cannot see the book, so some cancels and modifies target orders that have
@@ -217,12 +219,18 @@ std::optional<std::vector<Message>> read_messages(const std::string& path) {
     return messages;
 }
 
-bool write_trades(const std::string& path, const std::vector<TradeRecord>& trades) {
+// The venue labels the whole run, not a matching input, so it goes on every row unchanged
+bool write_trades(const std::string& path, const std::vector<TradeRecord>& trades,
+                  const std::string& venue) {
     std::ofstream file(path);
-    file << TRADES_HEADER << '\n';
+    file << TRADES_HEADER << (venue.empty() ? "" : ",venue") << '\n';
     for (const auto& [message, trade] : trades) {
         file << message << ',' << trade.aggressor_id << ',' << trade.passive_id << ','
-             << trade.price << ',' << trade.quantity << '\n';
+             << trade.price << ',' << trade.quantity;
+        if (!venue.empty()) {
+            file << ',' << venue;
+        }
+        file << '\n';
     }
     file.close();
     return !file.fail();
@@ -273,6 +281,13 @@ void pin_to_cpu(int cpu) {
     }
 }
 
+// Written unquoted into every trade row, so a comma or newline would corrupt the CSV
+bool valid_venue(std::string_view venue) {
+    return !venue.empty() && std::all_of(venue.begin(), venue.end(), [](char c) {
+        return (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9');
+    });
+}
+
 std::optional<Options> parse_options(int argc, char** argv) {
     Options options;
     for (int i = 1; i < argc; ++i) {
@@ -281,6 +296,11 @@ std::optional<Options> parse_options(int argc, char** argv) {
             options.input = argv[++i];
         } else if (arg == "--trades" && i + 1 < argc) {
             options.trades = argv[++i];
+        } else if (arg == "--venue" && i + 1 < argc) {
+            options.venue = argv[++i];
+            if (!valid_venue(options.venue)) {
+                return std::nullopt;
+            }
         } else if (!parse_number(arg, options.count)) {
             return std::nullopt;
         }
@@ -295,7 +315,9 @@ std::optional<Options> parse_options(int argc, char** argv) {
 int main(int argc, char** argv) {
     auto options = parse_options(argc, argv);
     if (!options) {
-        std::fprintf(stderr, "usage: %s [count] [--input flow.csv] [--trades trades.csv]\n",
+        std::fprintf(stderr,
+                     "usage: %s [count] [--input flow.csv] [--trades trades.csv] "
+                     "[--venue CODE]\n",
                      argv[0]);
         return 2;
     }
@@ -370,7 +392,8 @@ int main(int argc, char** argv) {
     std::printf("Resting:   %zu orders\n", book.order_count());
     std::printf("Matches single-threaded replay: %s\n", matches ? "yes" : "NO");
 
-    if (!options->trades.empty() && !write_trades(options->trades, results.trades)) {
+    if (!options->trades.empty()
+        && !write_trades(options->trades, results.trades, options->venue)) {
         std::fprintf(stderr, "cannot write %s\n", options->trades.c_str());
         return 2;
     }

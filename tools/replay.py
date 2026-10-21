@@ -10,10 +10,13 @@ def main():
     parser.add_argument("flow")
     parser.add_argument("--engine", default="build/matching_engine")
     parser.add_argument("--trades", help="default: <flow>.trades.csv")
+    parser.add_argument("--venue", help="label every trade with this venue code")
     args = parser.parse_args()
 
     trades = args.trades or str(Path(args.flow).with_suffix(".trades.csv"))
     command = [args.engine, "--input", args.flow, "--trades", trades]
+    if args.venue:
+        command += ["--venue", args.venue]
     print("$", " ".join(command), flush=True)
     try:
         result = subprocess.run(command)
